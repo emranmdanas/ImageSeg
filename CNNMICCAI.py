@@ -26,15 +26,14 @@ import scipy.io as io
 
 
 Feature_layer1=64      # Number of feature maps in layer 1  
-Feature_layer2=128     # Number of feature maps in layer 2  
-Feature_layer3=256     # Number of feature maps in layer 3  
-Feature_layer4=512     # Number of feature maps in layer 4  
-Feature_layer5=512     # Number of feature maps in layer 5  
-Feature_layer6=512      # Number of feature maps in layer 6
-weightfactor = 3 # weightfactor for the amplitude where you want to provide more weight
+Feature_layer2=96     # Number of feature maps in layer 2
+Feature_layer3=128     # Number of feature maps in layer 3
+Feature_layer4=128     # Number of feature maps in layer 4
+Feature_layer5=128     # Number of feature maps in layer 5
+Feature_layer6=128      # Number of feature maps in layer 6
+batch_size = 4  # Mini-batch size
 
-batch_size=1           # Batch size should be always 1
-
+weightfactor = 3 # weightfactor for the amplitude where you want to provide more weight. Recommend to use a small validation set to fix this hyper-parameter
 num_classes=2          # Number of classes: 2 (prostate and background) 
 
 inputdims=224           # Size of input and output images
@@ -77,10 +76,10 @@ def _feature_extraction(bottom):
 def _upscore_layer(bottom, num_classes, scopename, ksize=4, stride=2):
 
     strides = [1, stride, stride, 1]
-    in_features = bottom.get_shape()[3].value
+    in_features = bottom.shape[3]
 
     output_shape = tf.stack(
-        [bottom.get_shape()[0].value, 2*(bottom.get_shape()[1].value), 2*(bottom.get_shape()[2].value),
+        [bottom.shape[0], 2*(bottom.shape[1]), 2*(bottom.shape[2]),
          num_classes])
     f_shape = [ksize, ksize, num_classes, in_features]
     weights = get_deconv_filter(f_shape, scopename)
@@ -141,39 +140,30 @@ def _interpolation(bottom):
 
 
 
-device = '/cpu:0'
+device = '/gpu:0'
 
 with tf.device(device):
     print(tf.__version__)
-    x0 = tf.placeholder(tf.float32,shape=(batch_size, inputdims, inputdims, 1))
-    y0 = tf.placeholder(tf.int32, shape=(batch_size, inputdims, inputdims))
-    # weightmap = tf.placeholder(tf.float32, shape=(batch_size, inputdims, inputdims))
+    x0 = tf.placeholder(tf.float32,shape=(batch_size, inputdims, inputdims, 1))  # Input image
+    y0 = tf.placeholder(tf.int32, shape=(batch_size, inputdims, inputdims)) # Output label
+    weightmap = tf.placeholder(tf.float32, shape=(batch_size, inputdims, inputdims))
     learning_rate = tf.placeholder(tf.float32, name='learning_rate')
 
-    coarse_features = _feature_extraction(x0)
-    interpolated_output = _interpolation(coarse_features)
-    upscore0 = layers.conv2d(interpolated_output,num_classes, 1, padding='SAME', scope='score', activation_fn=None)
+    coarse_features = _feature_extraction(x0) # Generate features from the input image
+    interpolated_output = _interpolation(coarse_features) # Upsampling the features to the size of the input image
+    upscore0 = layers.conv2d(interpolated_output,num_classes, 1, padding='SAME', scope='score', activation_fn=None) # Predict the labels
 
 
-    logits0 = tf.reshape(upscore0, (-1, 1, 2))
-    cross_entropy0 = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits0, labels=tf.reshape(y0, (-1,1)))
+    # logits0 = tf.reshape(upscore0, (-1, 1, 2))
+    cross_entropy0 = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=upscore0, labels=y0) # Cross-entropy
 
-    #vars   = tf.trainable_variables()
-    #print( v.name for v in vars
-     #       if 'bias' or 'dilationkernel' or 'erosionkernel' not in v.name)
-    #lossL2 = tf.add_n([ tf.nn.l2_loss(v) for v in vars
-    #        if 'bias' not in v.name  ]) * lambdaregularizer
-    #print(vars)
+
 
     #Loss calculation
-    loss=tf.reduce_mean(cross_entropy0)
-    #self.lossregulizer=lossL2
-
+    loss=tf.reduce_mean(cross_entropy0*weightmap)
 
     train_step = tf.train.AdamOptimizer(learning_rate).minimize(loss)
-    #update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-    #with tf.control_dependencies(update_ops):
-    #    train_step = tf.train.AdamOptimizer(learning_rate).minimize(loss)
+
 
 load = 0 # 0 for fresh start and 1 for resume training from a previous optimization
 
@@ -188,10 +178,10 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         step_start = 0
 
     print(step_start)
-    totaliter=1000000
+    totaliter=1000000 # Total epochs
 
-    ProstateImages = os.listdir('SegUSimages') # Directory for training images
-    totalimages=len(ProstateImages)
+
+
     total_lossval=0.0
     loss_flag=0
 
@@ -213,44 +203,62 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         if (i>30000):
             learning_ratef=initial_learning_rate/1000
 
+        TrainingImages = os.listdir('TrainingImages')  # Directory for training images
+        totalimages = len(TrainingImages)
 
-        randomindex = np.random.randint(0, high=totalimages)
-        #print(randomindex)
-        #print(ProstateImages[randomindex])
-        im = Image.open('SegUSimages/' + ProstateImages[randomindex])
-        image = np.array(im, dtype=np.float32)
-        #image = image[::2, ::2]
-        org_image = image
-        image = image - 127.0
-        image = image / 127.0  # Normalize the image between -1 to 1
-        inputdata = np.expand_dims(image, axis=0)
-        inputdata = np.expand_dims(inputdata, axis=3)
-        label = scipy.io.loadmat('RefLabels/' + ProstateImages[randomindex][0:-4] + '.mat')['label']
-        #label=label[::2, ::2]
-        inputlabel = np.expand_dims(label, axis=0)
-        # edges = filter.canny(label, sigma=2.5, low_threshold=0.01, high_threshold=1)
-        # edges1 = np.array(edges, dtype=np.float32)
-        # im1 = cv2.GaussianBlur(edges1, (15, 15), 4)
-        # for _ in range(4):
-        #     im1 = cv2.GaussianBlur(im1, (15, 15), 4)
-        # im1 = im1 / np.max(im1.flatten())
-        # im1 = weightfactor * im1 + 1  # weightfactor for the amplitude where you want to provide more weight
-        # where_are_NaNs = np.isnan(im1)
-        # im1[where_are_NaNs] = 1
-        # inputweight = np.expand_dims(im1, axis=0)
+        inputimages=np.zeros((batch_size,inputdims,inputdims,1))
+        outputlables=np.zeros((batch_size,inputdims,inputdims))
+        weightmatrix=np.zeros((batch_size,inputdims,inputdims))
 
 
-        _, total_lossval1 = sess.run([train_step, loss], feed_dict={x0: inputdata, y0: inputlabel,
+        for batch_index in range(batch_size):
+            randomindex = np.random.randint(0, high=totalimages)
+            im = Image.open('TrainingImages/' + TrainingImages[randomindex])
+            image = np.array(im, dtype=np.float32)
+            image = image - 127.0
+            image = image / 127.0  # Normalize the image between -1 to 1
+            image = np.expand_dims(image, axis=2)
+            inputimages[batch_index,:,:,:]=image
+            label = scipy.io.loadmat('TrainingLabels/' + TrainingImages[randomindex][0:-4] + '.mat')['label']
+            label = np.array(label, dtype=np.int32)
+            outputlables[batch_index, :, :] = label
+            edges = cv2.Canny(np.array(label*255, dtype=np.uint8),100,200)
+            edges1 = np.array(edges, dtype=np.float32)
+            im1 = cv2.GaussianBlur(edges1, (15, 15), 4)
+            for _ in range(4):
+                im1 = cv2.GaussianBlur(im1, (15, 15), 4)
+            im1 = im1 / np.max(im1.flatten())
+            im1 = weightfactor * im1 + 1  # weightfactor for the amplitude where you want to provide more weight
+            where_are_NaNs = np.isnan(im1)
+            im1[where_are_NaNs] = 1
+            weightmatrix[batch_index,:,:]=im1
+
+            # plt.figure(1)
+            # plt.subplot(3,1,1)
+            # plt.imshow(image[:,:,0],cmap='gray')
+            # plt.subplot(3, 1, 2)
+            # plt.imshow(label, cmap='gray')
+            # plt.subplot(3, 1, 3)
+            # plt.imshow(im1, cmap='gray')
+            # plt.show()
+
+
+
+        _, total_lossval1 = sess.run([train_step, loss], feed_dict={x0: inputimages, y0: outputlables, weightmap: weightmatrix,
                                                                     learning_rate: learning_ratef})
         total_lossval = total_lossval + total_lossval1
         loss_flag = loss_flag + 1
-        print(total_lossval1)
+        # print(total_lossval1)
 
         if i % 1000 == 0:
             print(i, total_lossval / loss_flag, ',', learning_ratef)
             total_lossval = 0.0
             loss_flag = 0
             saver.save(sess, 'Checkpoints/' + 'model', global_step=i)
+
+            #   Validation
+
+
 
 
 
